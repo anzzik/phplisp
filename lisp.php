@@ -1,5 +1,7 @@
 <?php
 
+define('DEBUG', true);
+
 class InternalFunctionDef
 {
 	public $symbol;
@@ -8,7 +10,7 @@ class InternalFunctionDef
 
 	public function getOption($opt)
 	{
-		if (!isset($this->opts[$opt]))
+		if (!array_key_exists($opt, $this->opts))
 			return null;
 
 		return $this->opts[$opt];
@@ -90,7 +92,7 @@ class LispContext
 		$r = preg_match($pattern, $list, $matches);
 		if (count($matches) == 0)
 		{
-			echo 'Error: function call syntax incorrect in '.$list."\n";
+			dbg_log('Error: function call syntax incorrect in "%s"', $list);
 
 			return false;
 		}
@@ -106,15 +108,12 @@ class LispContext
 
 		foreach ($args as $key => $val)
 		{
-			echo 'body list: '.$body_list."\n";
-			echo 'replacing: '.$key.' - '.$val."\n";
 			$body_list = preg_replace('/'.preg_quote(' '.$key.' ').'/', ' '.$val.' ', $body_list);
 			$body_list = preg_replace('/'.preg_quote('('.$key.' ').'/', '('.$val.' ', $body_list);
 			$body_list = preg_replace('/'.preg_quote(' '.$key.')').'/', ' '.$val.')', $body_list);
-			echo 'body list now: '.$body_list."\n";
 		}
 
-		return process_list($this, $body_list);
+		return process_statement($this, $body_list);
 	}
 }
 
@@ -123,7 +122,7 @@ function list_explode($list)
 	return explode(" ", substr($list, 1, -1));
 }
 
-function list_clean($list)
+function clean($list)
 {
 	$matches = array();
 
@@ -134,7 +133,7 @@ function list_clean($list)
 	$list = preg_replace('/\(\s/', '(', $list);
 	$list = preg_replace('/\s\)/', ')', $list);
 
-	echo 'After cleaning: '.$list."\n";
+	dbg_log('Statement cleaned: "%s"', $list);
 
 	return $list;
 }
@@ -177,7 +176,7 @@ function __fn_print($args)
 
 	echo $arg."\n";
 
-	return 0;
+	return null;
 }
 
 function __fn_defun($args)
@@ -193,7 +192,7 @@ function __fn_defun($args)
 	$r = preg_match($pattern, $list, $matches);
 	if (count($matches) < 3)
 	{ 
-		echo 'Error: defun syntax incorrect in '.$list."\n";
+		dbg_log('Error: defun syntax incorrect in "%s"', $list);
 
 		return false;
 	}
@@ -206,22 +205,22 @@ function __fn_defun($args)
 	$ctx->addUserFn($userfn_sym, $list, $arg_list, $fn_body);
 }
 
-function get_inner_list($list)
+function get_inner_list($stm)
 {
-	if (!$list)
+	if (!$stm)
 		return false;
 
 	$matches = array();
 	$pattern = '/\(([^\(\)])+\)/';
 
-	$r = preg_match($pattern, $list, $matches);
+	$r = preg_match($pattern, $stm, $matches);
 
 	if ($r && count($matches) > 1)
 	{
 		return $matches[0];
 	}
 
-	return $list;
+	return $stm;
 }
 
 function get_fn_sym_from_list($list)
@@ -237,45 +236,15 @@ function get_fn_sym_from_list($list)
 	}
 }
 
-function evaluate($stm)
-{
-	$result = '';
-	$list = $stm;
-
-	while (1)
-	{
-		$result = get_inner_list($list);
-		if (!$result)
-		{
-			echo 'Error in evaluation with statement: '.$stm."\n";
-
-			break;
-		}
-
-		if ($result == $list)
-		{
-			break;
-		}
-
-		$list = $result;
-
-		echo '"'.$list.'" - "'.$result.'"'."\n";
-	}
-
-	return $result;
-}
-
 function process_list(&$context, $list)
 {
 	if (!$list)
 	{
-		echo 'Error: empty list in process_list'."\n";
+		dbg_log('Error: empty list in process_list');
 		return false;
 	}
 
-	echo "Start to process list ".$list."\n";
-
-	$list = list_clean($list);
+	dbg_log('Begin to process list: "%s"', $list);
 
 	$r = null;
 	$matches = array();
@@ -298,7 +267,7 @@ function process_list(&$context, $list)
 		return $r;
 	}
 
-	echo 'Error: function not found in process_list for list '.$list."\n";
+	dbg_log('Error: function not found in process_list: "%s"', $list);
 
 	return false;
 }
@@ -308,42 +277,57 @@ function process_statement(&$context, $stm)
 	if (!$stm)
 		return false;
 
-	echo "Start to process statement ".$stm."\n";
+	dbg_log('Begin to process statement: "%s"', $stm);
 
-	$r = false;
-
-	$stm = list_clean($stm);
+	$stm = clean($stm);
 
 	$fn_symbol = get_fn_sym_from_list($stm);
 
 	$fn = $context->getInternalFn($fn_symbol);
 	if ($fn && $fn->getOption('no_eval'))
 	{
-		echo 'no_eval with '.$stm."\n";
+		dbg_log('Evaluation skipped with "%s"', $stm);
 		return process_list($context, $stm);
 	}
 
+	$eval_stm = $stm;
 	while (1)
 	{
-		$list = get_inner_list($stm);
+		$list = get_inner_list($eval_stm);
 
-		if ($list && $list != $stm)
+		if ($list && $list != $eval_stm)
 		{
-			echo 'Sublist start with '.$list."\n";
 			$r = process_list($context, $list);
-			echo 'List processed: '.$list."\n";
-			$tmp = $stm;
-			$stm = preg_replace('/'.preg_quote($list).'/', $r, $stm);
 
-			echo $tmp.' --> '.$stm."\n";
+			$eval_stm = preg_replace('/'.preg_quote($list).'/', $r, $eval_stm);
+			$eval_stm = clean($eval_stm);
 		}
 		else
 			break;
 	}
 
-	echo 'Eval done'."\n";
+	dbg_log('Evaluation done: "%s" evaluated to "%s"', $stm, $eval_stm);
 
-	return process_list($context, $stm);
+	return process_list($context, $eval_stm);
+}
+
+function dbg_log($fmt )
+{
+	if (DEBUG == false)
+		return;
+
+	$bt = debug_backtrace();
+	$argv = func_get_args();
+	array_shift($argv);
+	$string = vsprintf($fmt, $argv);
+
+	$prefix = sprintf( "%s:%d: ",
+		basename($bt[0]['file']),
+		$bt[0]['line'] );
+
+	$line = date('Y-m-d H:i:s').' '.$prefix.$string."\n";
+
+	echo $line;
 }
 
 function execute()
@@ -354,10 +338,10 @@ function execute()
 	$ctx->addInternalFn('+', '__fn_plus');
 	$ctx->addInternalFn('print', '__fn_print');
 
-	$r = process_statement($ctx, '(defun test (a b) (+ a b 1)');
+	$r = process_statement($ctx, '(defun test (a b) ((print 2) (+ a b 1))');
 	$r = process_statement($ctx, '(print (+ (+ 3 (+ 5 6)) (+ 7 (+ (test 3 6) 7))))');
 
-	echo 'Statement returned: '.$r."\n";
+	dbg_log('Statement returned: %s', $r);
 }
 
 execute();
