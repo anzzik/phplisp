@@ -220,7 +220,7 @@ function __fn_defun($args)
 	$userfn_sym = $matches[1];
 	$arg_list = $matches[2];
 
-	$fn_body = substr($list, strlen($matches[0]) + 1);
+	$fn_body = substr($list, strlen($matches[0]) + 1, -1);
 
 	$ctx->addUserFn($userfn_sym, $list, $arg_list, $fn_body);
 }
@@ -250,17 +250,22 @@ function get_fn_sym_from_list($list)
 	$pattern = '/\(([^\s]+)/';
 
 	$r = preg_match($pattern, $list, $matches);
-	if ($r !== false)
-	{
-		return $matches[1];
-	}
+	if (!$r)
+        {
+                err_log('Function symbol not found in %s', $list);
+
+                return false;
+        }
+
+        return $matches[1];
 }
 
 function process_list(&$context, $list)
 {
 	if (!$list)
 	{
-		dbg_log('Error: empty list in process_list');
+		err_log('Empty list in process_list %s', 'd');
+
 		return false;
 	}
 
@@ -294,12 +299,10 @@ function process_list(&$context, $list)
 
 function process_statement(&$context, $stm)
 {
-	if (!$stm)
-		return false;
-
 	dbg_log('Begin to process statement: "%s"', $stm);
 
-	$stm = clean($stm);
+	if (!$stm)
+		return false;
 
 	$fn_symbol = get_fn_sym_from_list($stm);
 
@@ -331,14 +334,14 @@ function process_statement(&$context, $stm)
 	return process_list($context, $eval_stm);
 }
 
-function dbg_log($fmt )
+function err_log($fmt)
 {
-	if (DEBUG == false)
-		return;
 
 	$bt = debug_backtrace();
 	$argv = func_get_args();
+
 	array_shift($argv);
+
 	$string = vsprintf($fmt, $argv);
 
 	$prefix = sprintf( "%s:%d: ",
@@ -350,6 +353,119 @@ function dbg_log($fmt )
 	echo $line;
 }
 
+function dbg_log($fmt)
+{
+	if (DEBUG == false)
+		return;
+
+	$bt = debug_backtrace();
+	$argv = func_get_args();
+
+	array_shift($argv);
+
+	$string = vsprintf($fmt, $argv);
+
+	$prefix = sprintf( "%s:%d: ",
+		basename($bt[0]['file']),
+		$bt[0]['line'] );
+
+	$line = date('Y-m-d H:i:s').' '.$prefix.$string."\n";
+
+	echo $line;
+
+}
+
+function read_src_file($filename)
+{
+        $fp = fopen($filename, 'r');
+        if (!$fp)
+        {
+                err_log('File not found: %s', $filename);
+
+                return false;
+        }
+
+        $r = file_get_contents($filename);
+        if ($r === false)
+        {
+                err_log('File not found: %s', $filename);
+
+                return false;
+        }
+
+        dbg_log('File %s loaded', $filename);
+
+        return $r;
+}
+
+function explode_statements($src)
+{
+        $ready_for_end = true;
+        $starting_par = false;
+        $par_c = 0;
+        $current = '';
+        $statements = array();
+
+        dbg_log('Printing src in explode:');
+        for ($i = 0; $i < strlen($src); $i++)
+        {
+                switch ($src[$i])
+                {
+                case '(':
+                        if (!$starting_par)
+                        {
+                                if ($src[$i] != '(')
+                                {
+                                        err_log('Syntax error, no starting par found');
+                                
+                                        return false;
+                                }
+
+                                $starting_par = true;
+                        }
+
+                        $ready_for_end = false;
+                        $par_c++;
+
+                        break;
+
+                case ')':
+                        $par_c--;
+
+                        if ($par_c == 0)
+                                $ready_for_end = true;
+
+                        break;
+                }
+
+                $current .= $src[$i];
+
+                if ($par_c < 0)
+                {
+                        err_log('Syntax error, par_c = -1');
+
+                        return false;
+                }
+
+                if ($ready_for_end && $current)
+                {
+                        $statements[] = $current;
+                        $current = '';
+                }
+        }
+
+        if (!$ready_for_end)
+        {
+                err_log('Errors found in source with par_c %d', $par_c);
+
+                return false;
+        }
+
+        dbg_log('No error found in source');
+
+        return $statements;
+}
+
 function execute()
 {
 	$ctx = new LispContext();
@@ -358,10 +474,28 @@ function execute()
 	$ctx->addInternalFn('+', '__fn_plus');
 	$ctx->addInternalFn('print', '__fn_print');
 
-	$r = process_statement($ctx, '(defun test (a b) ((print 2) (+ a b 1))');
-	$r = process_statement($ctx, '(print (+ (+ 3 (+ 5 6)) (+ 7 (+ (test 3 6) 7))))');
+        $filename = 'testscript.lisp';
 
-	dbg_log('Statement returned: %s', $r);
+        $src = read_src_file($filename);
+        if ($src === false)
+        {
+                err_log('Error loading the source file: %s', $filename);
+
+                return false;
+        }
+
+        $stms = explode_statements($src);
+
+        foreach ($stms as $s)
+        {
+                if (!preg_match('/^[\s]*$/', $s))
+                {
+                        $stm = clean($s);
+                        $r = process_statement($ctx, $s);
+
+                        dbg_log('Statement returned: %s', $r);
+                }
+        }
 }
 
 execute();
