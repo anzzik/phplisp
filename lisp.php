@@ -27,14 +27,6 @@ class InternalFunctionDef
 	public $symbol;
 	public $fn;
 	public $opts;
-
-	public function getOption($opt)
-	{
-		if (!array_key_exists($opt, $this->opts))
-			return null;
-
-		return $this->opts[$opt];
-	}
 }
 
 class UserFunctionDef
@@ -45,19 +37,44 @@ class UserFunctionDef
 	public $body_list;
 }
 
+class StackNode
+{
+        public $args = array();
+        public $vars = array();
+}
+
 class LispContext 
 {
-	public $internal_fns;
-	public $user_fns;
-	public $vars;
+	public $internal_fns = array();
+	public $user_fns = array();
+	public $global_vars = array();
+        public $stack = array();
 
-	public function addInternalFn($symbol, $fn_cb, $opts = array())
+        public function stackPush($node)
+        {
+                array_push($this->stack, $node);
+        }
+
+        public function stackPop()
+        {
+                return array_pop($this->stack);
+        }
+
+        public function stackGetTop()
+        {
+                $tmp = array_slice($this->stack, -1);
+                if (count($tmp) > 0)
+                        return reset($tmp);
+
+                return null;
+        }
+
+	public function addInternalFn($symbol, $fn_cb)
 	{
 		$fn_d = new InternalFunctionDef();
 
 		$fn_d->symbol = $symbol;
 		$fn_d->fn = $fn_cb;
-		$fn_d->opts = $opts;
 
 		$this->internal_fns[$symbol] = $fn_d;
 	}
@@ -110,7 +127,7 @@ class LispContext
 
 		$pattern = '/\('.$symbol.'[\s]/';
 		$r = preg_match($pattern, $list, $matches);
-		if (count($matches) == 0)
+		if (!$r)
 		{
 			dbg_log('Error: function call syntax incorrect in "%s"', $list);
 
@@ -123,17 +140,42 @@ class LispContext
 		$args = list_explode($arg_list);
 
 		$args = array_combine($params, $args);
+                if ($args === false)
+                {
+                        err_log('Error, argument count incorrect in %s', $list);
+
+                        return false;
+                }
 
 		$body_list = $fn_d->body_list;
 
-		foreach ($args as $key => $val)
+                $n = new StackNode();
+
+                $n->args = $args;
+                $n->vars = array();
+                
+		foreach ($n->args as $key => $val)
 		{
 			$body_list = preg_replace('/'.preg_quote(' '.$key.' ').'/', ' '.$val.' ', $body_list);
 			$body_list = preg_replace('/'.preg_quote('('.$key.' ').'/', '('.$val.' ', $body_list);
 			$body_list = preg_replace('/'.preg_quote(' '.$key.')').'/', ' '.$val.')', $body_list);
 		}
 
-		return process_statement($this, $body_list);
+                $this->stackPush($n);
+
+                $stms = explode_statements($body_list);
+                foreach ($stms as $stm)
+                {
+                        $r = process_statement($this, $stm);
+                        if ($r === false)
+                        {
+                                err_log('Error, process_statement failed with list: %s', $body_list);
+                        }
+                }
+
+                $this->stackPop();
+
+                return $r;
 	}
 }
 
@@ -167,32 +209,15 @@ function __fn_plus($args)
 
         $eval_stm = $arg;
 
-	while (1)
-	{ 
-		$l = get_inner_list($eval_stm);
+        $r = preg_match('/\(([^\)]+)\)/', $eval_stm, $matches);
+        if (!$r || count($matches) < 2)
+        {
+                err_log('Error in __fn_plus list evaluation: %s', $eval_stm);
+        }
 
-		if ($l && $l != $eval_stm)
-		{
-			$r = process_list($ctx, $l);
+        $sum = array_sum(explode(' ', $matches[1]));
 
-			$eval_stm = preg_replace('/'.preg_quote($l).'/', $r, $eval_stm);
-                        $eval_stm = clean($eval_stm);
-
-                        continue;
-                }
-
-                $matches = array();
-
-                $r = preg_match('/\(([^\)]+)\)/', $eval_stm, $matches);
-                if (!$r || count($matches) < 2)
-                {
-                        err_log('Error in __fn_plus list evaluation: %s', $eval_stm);
-                }
-
-                $sum = array_sum(explode(' ', $matches[1]));
-
-		return $sum;
-	}
+        return $sum;
 }
 
 function __fn_print($args)
@@ -204,13 +229,14 @@ function __fn_print($args)
 
         $eval_stm = $arg;
 
+        /*
 	while (1)
 	{ 
 		$l = get_inner_list($eval_stm);
 
 		if ($l && $l != $eval_stm)
 		{
-			$r = process_list($ctx, $l);
+			$r = process_statement($ctx, $l);
 
 			$eval_stm = preg_replace('/'.preg_quote($l).'/', $r, $eval_stm);
                         $eval_stm = clean($eval_stm);
@@ -218,12 +244,14 @@ function __fn_print($args)
                         continue;
                 }
 
-                $r = process_list($ctx, $l);
+                $r = process_statement($ctx, $l);
 
-                echo $r."\n";
 
                 break;
 	}
+         */
+
+        echo $arg."\n";
 
 	return null;
 }
@@ -319,54 +347,17 @@ function get_fn_sym_from_list($list)
 {
 	$matches = array();
 
-	$pattern = '/\(([^\s]+)/';
+        $pattern = '/^\(([^\(\)\s]+)\s/';
 
 	$r = preg_match($pattern, $list, $matches);
 	if (!$r)
         {
-                err_log('Function symbol not found in %s', $list);
+                dbg_log('Function symbol not found in %s', $list);
 
                 return false;
         }
 
         return $matches[1];
-}
-
-function process_list(&$context, $list)
-{
-	if (!$list)
-	{
-		err_log('Empty list in process_list %s', 'd');
-
-		return false;
-	}
-
-	dbg_log('Begin to process list: "%s"', $list);
-
-	$r = null;
-	$matches = array();
-
-	$fn_symbol = get_fn_sym_from_list($list);
-
-	$fn = $context->getInternalFn($fn_symbol);
-	if ($fn)
-	{
-		$r = $context->callInternalFn($fn_symbol, $list);
-
-		return $r;
-	}
-
-	$fn = $context->getUserFn($fn_symbol);
-	if ($fn)
-	{
-		$r = $context->callUserFn($fn_symbol, $list);
-
-		return $r;
-	}
-
-	dbg_log('Function not found in process_list: "%s"', $list);
-
-	return $list;
 }
 
 function process_statement(&$context, $stm)
@@ -377,14 +368,45 @@ function process_statement(&$context, $stm)
 		return false;
 
 	$fn_symbol = get_fn_sym_from_list($stm);
+        if ($fn_symbol)
+        {
+                $fn = $context->getInternalFn($fn_symbol);
+                if ($fn)
+                {
+                        dbg_log('internal with stm: %s', $stm);
+                        $r = $context->callInternalFn($fn_symbol, $stm);
 
-	$fn = $context->getInternalFn($fn_symbol);
-	if ($fn)
-	{
-		$r = $context->callInternalFn($fn_symbol, $stm);
+                        return $r;
+                }
+        }
 
-		return $r;
+        $eval_stm = $stm;
+	while (1)
+	{ 
+		$l = get_inner_list($eval_stm);
+
+		if ($l && $l != $eval_stm)
+		{
+			$r = process_statement($context, $l);
+
+			$eval_stm = preg_replace('/'.preg_quote($l).'/', $r, $eval_stm);
+                        $eval_stm = clean($eval_stm);
+
+                        continue;
+                }
+
+                break;
 	}
+
+        $stm = $eval_stm;
+
+        $s_node = $context->stackGetTop();
+        if (!$s_node)
+        {
+                err_log('Stack not initiated');
+                
+                return false;
+        }
 
 	$fn = $context->getUserFn($fn_symbol);
 	if ($fn)
@@ -399,7 +421,6 @@ function process_statement(&$context, $stm)
 
 function err_log($fmt)
 {
-
 	$bt = debug_backtrace();
 	$argv = func_get_args();
 
@@ -500,7 +521,7 @@ function explode_statements($src)
 
                 if (!$starting_par && $src[$i] != '(' && !$is_wspc)
                 {
-                        err_log('Syntax error, no starting par found');
+                        err_log('Syntax error, no starting par found (%s)', $src[$i]);
 
                         return false;
                 }
@@ -546,6 +567,8 @@ function execute()
 
         $filename = 'testscript.lisp';
 
+        $ctx->stackPush(new StackNode());
+
         $src = read_src_file($filename);
         if ($src === false)
         {
@@ -555,7 +578,6 @@ function execute()
         }
 
         $stms = explode_statements($src);
-
         foreach ($stms as $s)
         {
                 if (!preg_match('/^[\s]*$/', $s))
@@ -566,6 +588,8 @@ function execute()
                         dbg_log('Statement returned: %s', $r);
                 }
         }
+
+        return true;
 }
 
 execute();
