@@ -163,7 +163,7 @@ class LispContext
 
                 $this->stackPush($n);
 
-                $stms = explode_statements($body_list);
+                $stms = explode_statements(substr($body_list, 1, -1));
                 foreach ($stms as $stm)
                 {
                         $r = process_statement($this, $stm);
@@ -322,7 +322,17 @@ function __fn_let($args)
                 $body_list = preg_replace('/'.preg_quote(' '.$key.')').'/', ' '.$val.')', $body_list);
         }
 
-        return process_statement($ctx, $body_list);
+	$stms = explode_statements(substr($body_list, 1, -1));
+	foreach ($stms as $stm)
+        {
+		$r = process_statement($ctx, $stm);
+		if ($r === false)
+		{
+			err_log('Error, process_statement failed with list: %s', $body_list);
+		}
+        }
+
+        return $r;
 }
 
 function get_inner_list($stm)
@@ -367,19 +377,6 @@ function process_statement(&$context, $stm)
 	if (!$stm)
 		return false;
 
-	$fn_symbol = get_fn_sym_from_list($stm);
-        if ($fn_symbol)
-        {
-                $fn = $context->getInternalFn($fn_symbol);
-                if ($fn)
-                {
-                        dbg_log('internal with stm: %s', $stm);
-                        $r = $context->callInternalFn($fn_symbol, $stm);
-
-                        return $r;
-                }
-        }
-
         $eval_stm = $stm;
 	while (1)
 	{ 
@@ -391,6 +388,8 @@ function process_statement(&$context, $stm)
 
 			$eval_stm = preg_replace('/'.preg_quote($l).'/', $r, $eval_stm);
                         $eval_stm = clean($eval_stm);
+
+			dbg_log('Statement evald: %s -> %s', $stm, $eval_stm);
 
                         continue;
                 }
@@ -407,6 +406,16 @@ function process_statement(&$context, $stm)
                 
                 return false;
         }
+
+	$fn_symbol = get_fn_sym_from_list($stm);
+
+	$fn = $context->getInternalFn($fn_symbol);
+	if ($fn)
+	{
+		$r = $context->callInternalFn($fn_symbol, $stm);
+
+		return $r;
+	}
 
 	$fn = $context->getUserFn($fn_symbol);
 	if ($fn)
@@ -583,6 +592,23 @@ function execute()
                 if (!preg_match('/^[\s]*$/', $s))
                 {
                         $stm = clean($s);
+
+			$fn_symbol = get_fn_sym_from_list($stm);
+
+			if ($fn_symbol == 'defun')
+			{
+				$ctx->callInternalFn($fn_symbol, $stm);
+
+				continue;
+			}
+
+			if ($fn_symbol == 'let')
+			{
+				$ctx->callInternalFn($fn_symbol, $stm);
+
+				continue;
+			}
+
                         $r = process_statement($ctx, $s);
 
                         dbg_log('Statement returned: %s', $r);
@@ -591,6 +617,8 @@ function execute()
 
         return true;
 }
+
+date_default_timezone_set('Europe/Helsinki');
 
 execute();
 
