@@ -26,7 +26,7 @@ class InternalFunctionDef
 {
 	public $symbol;
 	public $fn;
-	public $opts;
+	public $argc;
 }
 
 class UserFunctionDef
@@ -69,7 +69,7 @@ class LispContext
                 return null;
         }
 
-	public function addInternalFn($symbol, $fn_cb)
+	public function addInternalFn($symbol, $fn_cb, $argc)
 	{
 		$fn_d = new InternalFunctionDef();
 
@@ -370,6 +370,17 @@ function get_fn_sym_from_list($list)
         return $matches[1];
 }
 
+function get_args_from_list($list, $argc)
+{
+	$frags = explode_statements(substr($list, 1, -1));
+	if (count($frags) != $argc)
+	{
+		err_log('Error, incorrect number of args in %s', $list);
+
+		return false;
+	}
+}
+
 function process_statement(&$context, $stm)
 {
 	dbg_log('Begin to process statement: "%s"', $stm);
@@ -569,10 +580,10 @@ function execute()
 {
 	$ctx = new LispContext();
 
-	$ctx->addInternalFn('defun', '__fn_defun');
-	$ctx->addInternalFn('+', '__fn_plus');
-	$ctx->addInternalFn('print', '__fn_print');
-	$ctx->addInternalFn('let', '__fn_let');
+	$ctx->addInternalFn('defun', '__fn_defun', 4);
+	$ctx->addInternalFn('+', '__fn_plus', 3);
+	$ctx->addInternalFn('print', '__fn_print', 2);
+	$ctx->addInternalFn('let', '__fn_let', 3);
 
         $filename = 'testscript.lisp';
 
@@ -594,6 +605,11 @@ function execute()
                         $stm = clean($s);
 
 			$fn_symbol = get_fn_sym_from_list($stm);
+			$fn = $ctx->getInternalFn($fn_symbol);
+
+			$r = get_args_from_list($stm, count($fn->args));
+			var_dump($r);
+			die();
 
 			if ($fn_symbol == 'defun')
 			{
