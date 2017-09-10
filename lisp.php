@@ -161,13 +161,38 @@ function clean($list)
 function __fn_plus($args)
 { 
 	$ctx = $args['ctx'];
+	$symbol = $args['symbol'];
 	$list = $args['list'];
+	$arg = '('.substr($list, strlen($symbol) + 2);
 
-	$arr = explode(" ", $list);
-	if (count($arr) > 1)
-		return array_sum(array_slice($arr, 1));
+        $eval_stm = $arg;
 
-	return 0;
+	while (1)
+	{ 
+		$l = get_inner_list($eval_stm);
+
+		if ($l && $l != $eval_stm)
+		{
+			$r = process_list($ctx, $l);
+
+			$eval_stm = preg_replace('/'.preg_quote($l).'/', $r, $eval_stm);
+                        $eval_stm = clean($eval_stm);
+
+                        continue;
+                }
+
+                $matches = array();
+
+                $r = preg_match('/\(([^\)]+)\)/', $eval_stm, $matches);
+                if (!$r || count($matches) < 2)
+                {
+                        err_log('Error in __fn_plus list evaluation: %s', $eval_stm);
+                }
+
+                $sum = array_sum(explode(' ', $matches[1]));
+
+		return $sum;
+	}
 }
 
 function __fn_print($args)
@@ -175,26 +200,30 @@ function __fn_print($args)
 	$ctx = $args['ctx'];
 	$symbol = $args['symbol'];
 	$list = $args['list'];
-
 	$arg = substr($list, strlen($symbol) + 2, -1);
+
+        $eval_stm = $arg;
 
 	while (1)
 	{ 
-		$matches = array();
-		$pattern = '/\(([^\)]+)/';
+		$l = get_inner_list($eval_stm);
 
-		if (preg_match($pattern, $arg, $matches))
-		{ 
-			$r = process_list($ctx, '('.$matches[1].')');
-			$arg = preg_replace('/'.preg_quote('('.$matches[1].')').'/', $r, $arg);
+		if ($l && $l != $eval_stm)
+		{
+			$r = process_list($ctx, $l);
 
-			continue;
-		}
+			$eval_stm = preg_replace('/'.preg_quote($l).'/', $r, $eval_stm);
+                        $eval_stm = clean($eval_stm);
 
-		break;
+                        continue;
+                }
+
+                $r = process_list($ctx, $l);
+
+                echo $r."\n";
+
+                break;
 	}
-
-	echo $arg."\n";
 
 	return null;
 }
@@ -223,6 +252,49 @@ function __fn_defun($args)
 	$fn_body = substr($list, strlen($matches[0]) + 1, -1);
 
 	$ctx->addUserFn($userfn_sym, $list, $arg_list, $fn_body);
+}
+
+function __fn_let($args)
+{
+	$ctx = $args['ctx'];
+	$symbol = $args['symbol'];
+	$list = $args['list'];
+	$arg_list = substr($list, strlen($symbol) + 2, -1);
+
+        $arg_arr = explode_statements($arg_list);
+        if (count($arg_arr) != 2)
+        {
+                err_log('Error in __fn_let: incorrect syntax in %s', $list);
+
+                return false;
+        }
+
+        $let_arg_lists = explode_statements(substr($arg_arr[0], 1, -1));
+
+        $let_args = array();
+        foreach ($let_arg_lists as $l)
+        {
+                $tmp = explode(' ', substr($l, 1, -1));
+                if (count($tmp) != 2)
+                {
+                        err_log('Error in __fn_let: incorrect syntax in variable definition (%s)', $l);
+
+                        return false;
+                }
+
+                $let_args[$tmp[0]] = $tmp[1];
+        }
+
+        $body_list = $arg_arr[1];
+
+        foreach ($let_args as $key => $val)
+        {
+                $body_list = preg_replace('/'.preg_quote(' '.$key.' ').'/', ' '.$val.' ', $body_list);
+                $body_list = preg_replace('/'.preg_quote('('.$key.' ').'/', '('.$val.' ', $body_list);
+                $body_list = preg_replace('/'.preg_quote(' '.$key.')').'/', ' '.$val.')', $body_list);
+        }
+
+        return process_statement($ctx, $body_list);
 }
 
 function get_inner_list($stm)
@@ -292,9 +364,9 @@ function process_list(&$context, $list)
 		return $r;
 	}
 
-	dbg_log('Error: function not found in process_list: "%s"', $list);
+	dbg_log('Function not found in process_list: "%s"', $list);
 
-	return false;
+	return $list;
 }
 
 function process_statement(&$context, $stm)
@@ -307,31 +379,22 @@ function process_statement(&$context, $stm)
 	$fn_symbol = get_fn_sym_from_list($stm);
 
 	$fn = $context->getInternalFn($fn_symbol);
-	if ($fn && $fn->getOption('no_eval'))
+	if ($fn)
 	{
-		dbg_log('Evaluation skipped with "%s"', $stm);
-		return process_list($context, $stm);
+		$r = $context->callInternalFn($fn_symbol, $stm);
+
+		return $r;
 	}
 
-	$eval_stm = $stm;
-	while (1)
+	$fn = $context->getUserFn($fn_symbol);
+	if ($fn)
 	{
-		$list = get_inner_list($eval_stm);
+		$r = $context->callUserFn($fn_symbol, $stm);
 
-		if ($list && $list != $eval_stm)
-		{
-			$r = process_list($context, $list);
-
-			$eval_stm = preg_replace('/'.preg_quote($list).'/', $r, $eval_stm);
-			$eval_stm = clean($eval_stm);
-		}
-		else
-			break;
+		return $r;
 	}
 
-	dbg_log('Evaluation done: "%s" evaluated to "%s"', $stm, $eval_stm);
-
-	return process_list($context, $eval_stm);
+        return false;
 }
 
 function err_log($fmt)
@@ -406,21 +469,18 @@ function explode_statements($src)
         $current = '';
         $statements = array();
 
-        dbg_log('Printing src in explode:');
         for ($i = 0; $i < strlen($src); $i++)
         {
+                if (trim($src[$i]) == '')
+                        $is_wspc = true;
+                else
+                        $is_wspc = false;
+
                 switch ($src[$i])
                 {
                 case '(':
                         if (!$starting_par)
                         {
-                                if ($src[$i] != '(')
-                                {
-                                        err_log('Syntax error, no starting par found');
-                                
-                                        return false;
-                                }
-
                                 $starting_par = true;
                         }
 
@@ -438,7 +498,12 @@ function explode_statements($src)
                         break;
                 }
 
-                $current .= $src[$i];
+                if (!$starting_par && $src[$i] != '(' && !$is_wspc)
+                {
+                        err_log('Syntax error, no starting par found');
+
+                        return false;
+                }
 
                 if ($par_c < 0)
                 {
@@ -447,9 +512,13 @@ function explode_statements($src)
                         return false;
                 }
 
+                $current .= $src[$i];
+
                 if ($ready_for_end && $current)
                 {
-                        $statements[] = $current;
+                        if (!preg_match('/^[\s]*$/', $current))
+                                $statements[] = $current;
+
                         $current = '';
                 }
         }
@@ -470,9 +539,10 @@ function execute()
 {
 	$ctx = new LispContext();
 
-	$ctx->addInternalFn('defun', '__fn_defun', array('no_eval' => true));
+	$ctx->addInternalFn('defun', '__fn_defun');
 	$ctx->addInternalFn('+', '__fn_plus');
 	$ctx->addInternalFn('print', '__fn_print');
+	$ctx->addInternalFn('let', '__fn_let');
 
         $filename = 'testscript.lisp';
 
