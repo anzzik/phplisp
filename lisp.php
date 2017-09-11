@@ -22,33 +22,72 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 define('DEBUG', false);
 
-class InternalFunctionDef
+class FunctionDef
 {
 	public $symbol;
+	public $opts;
+	public $type;
+}
+
+class InternalFunctionDef extends FunctionDef
+{
 	public $fn;
 	public $argc;
-	public $opts;
 
-	public function callFn($ctx, $args)
+	public function callFn($ctx)
 	{
-		$list = '('.$this->symbol.' '.implode(' ', $args).')';
+		$sn = $ctx->stackGetTop();
+
 		return call_user_func($this->fn, 
-			array('ctx' => $ctx, 'symbol' => $this->symbol, 'list' => $list, 'args' => $args));
+			array('ctx' => $ctx, 'symbol' => $this->symbol, 'args' => $sn->args));
 	}
 }
 
-class UserFunctionDef
+class UserFunctionDef extends FunctionDef
 {
-	public $symbol;
-	public $param_list;
+	public $params;
 	public $body_list;
-	public $opts;
+
+	public function callFn($ctx)
+	{
+		$sn = $ctx->stackGetTop();
+
+		$arg_map = array();
+		foreach ($this->params as $key => $p)
+		{
+			if (isset($sn->args[$key]))
+				$arg_map[$p] = $sn->args[$key];
+		}
+
+
+		$body_list = $this->body_list;
+		foreach ($arg_map as $key => $val)
+		{
+			$body_list = preg_replace('/'.preg_quote(' '.$key.' ').'/', ' '.$val.' ', $body_list);
+			$body_list = preg_replace('/'.preg_quote('('.$key.' ').'/', '('.$val.' ', $body_list);
+			$body_list = preg_replace('/'.preg_quote(' '.$key.')').'/', ' '.$val.')', $body_list);
+		}
+
+		$r = process_statement($ctx, $body_list);
+		if ($r === false)
+		{
+			err_log('Error, process_statement failed with list: %s', $body_list);
+		}
+
+		return $r;
+	}
 }
 
 class StackNode
 {
-        public $args = array();
-        public $vars = array();
+        public $args;
+        public $vars;
+
+	public function __construct($args = array())
+	{
+		$this->args = $args;
+		$this->vars = array();
+	}
 }
 
 class LispContext 
@@ -77,6 +116,19 @@ class LispContext
                 return null;
         }
 
+	public function getFunctionDef($symbol)
+	{
+		$fn = null;
+
+		if (isset($this->internal_fns[$symbol]))
+			$fn = $this->internal_fns[$symbol];
+
+		if (isset($this->user_fns[$symbol]))
+			$fn = $this->user_fns[$symbol];
+
+		return $fn;
+	}
+
 	public function addInternalFn($symbol, $fn_cb, $argc, $opts = array())
 	{
 		$fn_d = new InternalFunctionDef();
@@ -84,85 +136,21 @@ class LispContext
 		$fn_d->symbol = $symbol;
 		$fn_d->fn = $fn_cb;
 		$fn_d->opts = $opts;
+		$fn_d->type = 'internal';
 
 		$this->internal_fns[$symbol] = $fn_d;
 	}
 
-	public function addUserFn($symbol, $param_list, $body_list)
+	public function addUserFn($symbol, $params, $body_list)
 	{
 		$fn_d = new UserFunctionDef();
 
 		$fn_d->symbol = $symbol;
-		$fn_d->param_list = $param_list;
+		$fn_d->params = $params;
 		$fn_d->body_list = $body_list;
+		$fn_d->type = 'user';
 
 		$this->user_fns[$symbol] = $fn_d;
-	}
-
-	public function getInternalFn($symbol)
-	{
-		if (isset($this->internal_fns[$symbol]))
-			return $this->internal_fns[$symbol];
-
-		return null;
-	}
-
-	public function getUserFn($symbol)
-	{
-		if (isset($this->user_fns[$symbol]))
-			return $this->user_fns[$symbol];
-
-		return null;
-	}
-
-	public function callUserFn($components)
-	{
-		$fn_symbol = reset($components);
-		$args = array();
-
-		if (!isset($this->user_fns[$fn_symbol]))
-		{
-                        err_log('Error, user function not found with symbol %s', $fn_symbol);
-
-                        return false;
-		}
-
-		$fn_d = $this->user_fns[$fn_symbol];
-
-
-		$arg_values = array_slice($components, 1);
-
-		$parameters = get_components($fn_d->param_list);
-		foreach ($parameters as $key => $p)
-		{
-			if (isset($arg_values[$key]))
-				$args[$p] = $arg_values[$key];
-		}
-
-		$body_list = $fn_d->body_list;
-		foreach ($args as $key => $val)
-		{
-			$body_list = preg_replace('/'.preg_quote(' '.$key.' ').'/', ' '.$val.' ', $body_list);
-			$body_list = preg_replace('/'.preg_quote('('.$key.' ').'/', '('.$val.' ', $body_list);
-			$body_list = preg_replace('/'.preg_quote(' '.$key.')').'/', ' '.$val.')', $body_list);
-		}
-
-                $n = new StackNode();
-
-                $n->args = $args;
-                $n->vars = array();
-
-                $this->stackPush($n);
-
-		$r = process_statement($this, $body_list);
-		if ($r === false)
-		{
-			err_log('Error, process_statement failed with list: %s', $body_list);
-		}
-
-                $this->stackPop();
-
-		return $r;
 	}
 }
 	 
@@ -214,10 +202,10 @@ function __fn_defun($args)
 	}
 
 	$userfn_sym = $args[0];
-	$arg_list = $args[1];
+	$params = get_components($args[1]);
 	$fn_body = $args[2];
 
-	$ctx->addUserFn($userfn_sym, $arg_list, $fn_body);
+	$ctx->addUserFn($userfn_sym, $params, $fn_body);
 }
 
 function __fn_let($args)
@@ -286,15 +274,7 @@ function call_function($ctx, $components = array())
 
 	$fn_symbol = $components[0];
 
-	$type = 'internal';
-
-	$fn = $ctx->getInternalFn($fn_symbol);
-	if (!$fn)
-	{
-		$fn = $ctx->getUserFn($fn_symbol);
-		$type = 'user';
-	}
-
+	$fn = $ctx->getFunctionDef($fn_symbol);
 	if (!$fn)
 	{
 		err_log('Error, function symbol %s is not defined', $fn_symbol);
@@ -315,12 +295,7 @@ function call_function($ctx, $components = array())
 			$sym = reset($comps);
 			if ($sym)
 			{
-				$a_fn = $ctx->getInternalFn($sym);
-				if (!$a_fn)
-				{
-					$a_fn = $ctx->getUserFn($sym);
-				}
-
+				$a_fn = $ctx->getFunctionDef($sym);
 				if ($a_fn)
 				{
 					$a_args = array_slice($comps, 1);
@@ -339,10 +314,13 @@ function call_function($ctx, $components = array())
 
 	dbg_log('actually calling "%s" with args %s', $fn_symbol, print_r($args, true));
 
-	if ($type == 'internal')
-		$r = $fn->callFn($ctx, $args);
-	else
-		$r = $ctx->callUserFn($components);
+	$n = new StackNode($args);
+
+	$ctx->stackPush($n);
+
+	$r = $fn->callFn($ctx);
+
+	$ctx->stackPop($n);
 
 	return $r;
 }
